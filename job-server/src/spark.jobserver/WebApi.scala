@@ -1,38 +1,41 @@
 package spark.jobserver
 
+import java.util.NoSuchElementException
 import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLContext
 
-import akka.actor.{ ActorSystem, ActorRef }
+import akka.actor.{Actor, ActorLogging, ActorRef, ActorSystem, Props}
 import akka.pattern.ask
 import akka.util.Timeout
-import com.typesafe.config.{ Config, ConfigFactory, ConfigException, ConfigRenderOptions }
-import java.util.NoSuchElementException
-import javax.net.ssl.SSLContext
-import ooyala.common.akka.web.{ WebService, CommonRoutes }
+import com.typesafe.config.{Config, ConfigException, ConfigFactory, ConfigRenderOptions}
+import ooyala.common.akka.web.JsonUtils.AnyJsonFormat
+import ooyala.common.akka.web.{CommonRoutes, WebService}
+import org.apache.shiro.SecurityUtils
+import org.apache.shiro.config.IniSecurityManagerFactory
 import org.joda.time.DateTime
 import org.slf4j.LoggerFactory
-import spark.jobserver.util.SparkJobUtils
-import spark.jobserver.util.SSLContextFactory
+import spark.jobserver.auth._
+import spark.jobserver.io.JobInfo
 import spark.jobserver.routes.DataRoutes
+import spark.jobserver.util.{SSLContextFactory, SparkJobUtils}
+import spray.can.Http
+import spray.http._
+import spray.httpx.SprayJsonSupport.sprayJsonMarshaller
+import spray.io.ServerSSLEngineProvider
+import spray.json.DefaultJsonProtocol._
+import spray.routing.directives.AuthMagnet
+import spray.routing.{HttpService, RequestContext, Route}
+
 import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.util.Try
-import spark.jobserver.io.JobInfo
-import spark.jobserver.auth._
-import spray.http.HttpResponse
-import spray.http.MediaTypes
-import spray.http.StatusCodes
-import spray.httpx.SprayJsonSupport.sprayJsonMarshaller
-import spray.json.DefaultJsonProtocol._
-import spray.routing.{ HttpService, Route, RequestContext }
-import spray.routing.directives.AuthMagnet
-import spray.io.ServerSSLEngineProvider
-import org.apache.shiro.config.IniSecurityManagerFactory
-import org.apache.shiro.mgt.SecurityManager
-import org.apache.shiro.SecurityUtils
+
 
 object WebApi {
   val StatusKey = "status"
   val ResultKey = "result"
+  val ResultKeyStartBytes = "{\n".getBytes
+  val ResultKeyEndBytes = "}".getBytes
+  val ResultKeyBytes = ("\"" + ResultKey + "\":").getBytes
 
   def badRequest(ctx: RequestContext, msg: String) {
     ctx.complete(StatusCodes.BadRequest, errMap(msg))
@@ -59,6 +62,14 @@ object WebApi {
 
   def resultToTable(result: Any): Map[String, Any] = {
     Map(ResultKey -> result)
+  }
+
+  def resultToByteIterator(jobReport: Map[String, Any], result: Iterator[_]): Iterator[_] = {
+    ResultKeyStartBytes.toIterator ++
+      (jobReport.map(t => Seq(AnyJsonFormat.write(t._1).toString(),
+                AnyJsonFormat.write(t._2).toString()).mkString(":") ).mkString(",") ++
+        (if(jobReport.nonEmpty) "," else "")).getBytes().toIterator ++
+      ResultKeyBytes.toIterator ++ result ++ ResultKeyEndBytes.toIterator
   }
 
   def formatException(t: Throwable): Any =
@@ -98,8 +109,9 @@ class WebApi(system: ActorSystem,
     extends HttpService with CommonRoutes with DataRoutes with SJSAuthenticator with CORSSupport {
   import CommonMessages._
   import ContextSupervisor._
-  import scala.concurrent.duration._
   import WebApi._
+
+  import scala.concurrent.duration._
 
   // Get spray-json type classes for serializing Map[String, Any]
   import ooyala.common.akka.web.JsonUtils._
@@ -112,6 +124,12 @@ class WebApi(system: ActorSystem,
   val DefaultJobLimit = 50
   val StatusKey = "status"
   val ResultKey = "result"
+  val ResultChunkSize = if (config.hasPath("spark.jobserver.result-chunk-size")) {
+    config.getBytes("spark.jobserver.result-chunk-size").toInt
+  }
+  else {
+    100 * 1024
+  }
 
   val contextTimeout = SparkJobUtils.getContextTimeout(config)
   val bindAddress = config.getString("spark.jobserver.bind-address")
@@ -211,7 +229,8 @@ class WebApi(system: ActorSystem,
    *    DELETE /data/<filename>       - deletes given file, no-op if file does not exist
    *    POST /data/<filename-prefix>  - upload a new data file, using the given prefix,
    *                                      a time stamp is appended to ensure uniqueness
-   * @author TimMaltGermany
+    *
+    * @author TimMaltGermany
    */
   def dataRoutes: Route = pathPrefix("data") {
     // user authentication
@@ -228,6 +247,7 @@ class WebApi(system: ActorSystem,
    */
   def contextRoutes: Route = pathPrefix("contexts") {
     import ContextSupervisor._
+
     import collection.JavaConverters._
     // user authentication
     authenticate(authenticator) { authInfo =>
@@ -284,9 +304,9 @@ class WebApi(system: ActorSystem,
             respondWithMediaType(MediaTypes.`text/plain`) { ctx =>
               reset match {
                 case "reboot" => {
-                  import ContextSupervisor._
-                  import collection.JavaConverters._
                   import java.util.concurrent.TimeUnit
+
+                  import ContextSupervisor._
 
                   logger.warn("refreshing contexts")
                   val future = (supervisor ? ListContexts).mapTo[Seq[String]]
@@ -384,7 +404,12 @@ class WebApi(system: ActorSystem,
                 val resultFuture = jobInfo ? GetJobResult(jobId)
                 resultFuture.map {
                   case JobResult(_, result) =>
-                    ctx.complete(jobReport ++ resultToTable(result))
+                    result match {
+                      case s: Stream[_] =>
+                        sendStreamingResponse(ctx, ResultChunkSize,
+                          resultToByteIterator(jobReport, s.toIterator))
+                      case _ => ctx.complete(jobReport ++ resultToTable(result))
+                    }
                   case _ =>
                     ctx.complete(jobReport)
                 }
@@ -416,7 +441,8 @@ class WebApi(system: ActorSystem,
          * [
          *   {jobId: "word-count-2013-04-22", status: "RUNNING"}
          * ]
-         * @optional @param limit Int - optional limit to number of jobs to display, defaults to 50
+          *
+          * @optional @param limit Int - optional limit to number of jobs to display, defaults to 50
          */
         get {
           parameters('limit.as[Int] ?) { (limitOpt) =>
@@ -466,7 +492,13 @@ class WebApi(system: ActorSystem,
                       JobManagerActor.StartJob(appName, classPath, jobConfig, events))(timeout)
                     respondWithMediaType(MediaTypes.`application/json`) { ctx =>
                       future.map {
-                        case JobResult(_, res)       => ctx.complete(resultToTable(res))
+                        case JobResult(_, res) => {
+                          res match {
+                            case s: Stream[_] => sendStreamingResponse(ctx, ResultChunkSize,
+                              resultToByteIterator(Map.empty, s.toIterator))
+                            case _ => ctx.complete(resultToTable(res))
+                          }
+                        }
                         case JobErroredOut(_, _, ex) => ctx.complete(errMap(ex, "ERROR"))
                         case JobStarted(jobId, context, _) =>
                           jobInfo ! StoreJobConfig(jobId, postedJobConfig)
@@ -501,6 +533,43 @@ class WebApi(system: ActorSystem,
               }
           }
         }
+    }
+  }
+
+  private def sendStreamingResponse(ctx: RequestContext,
+                                    chunkSize: Int,
+                                    byteIterator: Iterator[_]): Unit = {
+    // simple case class whose instances we use as send confirmation message for streaming chunks
+    case class Ok(remaining: Iterator[_])
+    actorRefFactory.actorOf {
+      Props {
+        new Actor with ActorLogging {
+          // we use the successful sending of a chunk as trigger for sending the next chunk
+          ctx.responder ! ChunkedResponseStart(
+            HttpResponse(entity = HttpEntity(MediaTypes.`application/json`,
+              byteIterator.take(chunkSize).map {
+                case c: Byte => c
+              }.toArray))).withAck(Ok(byteIterator))
+
+          def receive: Receive = {
+            case Ok(remaining) =>
+              val arr = remaining.take(chunkSize).map {
+                case c: Byte => c
+              }.toArray
+              if (arr.nonEmpty) {
+                ctx.responder ! MessageChunk(arr).withAck(Ok(remaining))
+              }
+              else {
+                ctx.responder ! ChunkedMessageEnd
+                context.stop(self)
+              }
+            case ev: Http.ConnectionClosed => {
+              log.warning("Stopping response streaming due to {}", ev)
+              context.stop(self)
+            }
+          }
+        }
+      }
     }
   }
 

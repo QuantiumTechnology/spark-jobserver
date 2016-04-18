@@ -139,6 +139,17 @@ class WebApiMainRoutesSpec extends WebApiSpec {
       }
     }
 
+    it("adhoc job with Iterator result of sync route should return 200 and chunked result") {
+      val config2 = "foo.baz = booboo"
+      Post("/jobs?appName=foo.iterator&classPath=com.abc.meme&sync=true", config2) ~>
+        sealRoute(routes) ~> check {
+        status should be (OK)
+        responseAs[Map[String, Any]] should be (Map(
+          ResultKey -> "1, 2, 3, 4, 5, 6"
+        ))
+      }
+    }
+
     it("should be able to take a timeout param") {
       val config2 = "foo.baz = booboo"
       Post("/jobs?appName=foo&classPath=com.abc.meme&sync=true&timeout=5", config2) ~>
@@ -278,6 +289,15 @@ class WebApiMainRoutesSpec extends WebApiSpec {
         status should be (OK)
         responseAs[Map[String, Any]] should be (
           getJobStatusInfoMap ++ Map(ResultKey -> "1, 2, 3, 4, 5, 6, 7")
+        )
+      }
+    }
+
+    it("should return no result for Iterator") {
+      Get("/jobs/_iterator") ~> sealRoute(routes) ~> check {
+        status should be (OK)
+        responseAs[Map[String, Any]] should be (
+          getJobStatusInfoMap ++ Map(ResultKey -> "_iterator!!!")
         )
       }
     }

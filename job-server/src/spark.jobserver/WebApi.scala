@@ -408,6 +408,9 @@ class WebApi(system: ActorSystem,
                       case s: Stream[_] =>
                         sendStreamingResponse(ctx, ResultChunkSize,
                           resultToByteIterator(jobReport, s.toIterator))
+                      case i: Iterator[_] =>
+                        sendStreamingResponse(ctx, ResultChunkSize,
+                          resultToByteIterator(jobReport, i))
                       case _ => ctx.complete(jobReport ++ resultToTable(result))
                     }
                   case _ =>
@@ -496,6 +499,8 @@ class WebApi(system: ActorSystem,
                           res match {
                             case s: Stream[_] => sendStreamingResponse(ctx, ResultChunkSize,
                               resultToByteIterator(Map.empty, s.toIterator))
+                            case i: Iterator[_] => sendStreamingResponse(ctx, ResultChunkSize,
+                              resultToByteIterator(Map.empty, i))
                             case _ => ctx.complete(resultToTable(res))
                           }
                         }

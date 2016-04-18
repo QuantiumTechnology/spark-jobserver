@@ -41,7 +41,11 @@ class JobResultActor extends InstrumentedActor with YammerMetrics {
       sender ! cache.get(jobId).map(JobResult(jobId, _)).getOrElse(NoSuchJobId)
 
     case JobResult(jobId, result) =>
-      cache.put(jobId, result)
+      result match {
+        case i: Iterator[_] =>
+          logger.debug("Job result for JobID {} is Iterator[] and will not be cached", jobId)
+        case _ => cache.put(jobId, result)
+      }
       logger.debug("Received job results for JobID {}", jobId)
       subscribers.get(jobId).foreach(_ ! JobResult(jobId, result))
       subscribers.remove(jobId)

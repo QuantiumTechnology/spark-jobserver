@@ -77,6 +77,8 @@ with ScalatestRouteTest with HttpService {
         sender ! finishedJobInfo
       case GetJobStatus("_stream") =>
         sender ! finishedJobInfo
+      case GetJobStatus("_iterator") =>
+        sender ! finishedJobInfo
       case GetJobResult("_num") =>
         sender ! JobResult("_num", 5000)
       case GetJobStatus("_unk") =>
@@ -132,6 +134,14 @@ with ScalatestRouteTest with HttpService {
         val result = "\"1, 2, 3, 4, 5, 6\"".getBytes().toStream
         if (events.contains(classOf[JobResult])) sender ! JobResult("foo.stream", result)
         statusActor ! Unsubscribe("foo.stream", sender)
+
+      case StartJob("foo.iterator", _, config, events)     =>
+        statusActor ! Subscribe("foo.iterator", sender, events)
+        statusActor ! JobStatusActor.JobInit(JobInfo("foo.iterator", "context", null, "", dt, None, None))
+        statusActor ! JobStarted("foo.iterator", "context1", dt)
+        val result = "\"1, 2, 3, 4, 5, 6\"".getBytes().toIterator
+        if (events.contains(classOf[JobResult])) sender ! JobResult("foo.iterator", result)
+        statusActor ! Unsubscribe("foo.iterator", sender)
 
       case GetJobConfig("badjobid") => sender ! NoSuchJobId
       case GetJobConfig(_)          => sender ! config

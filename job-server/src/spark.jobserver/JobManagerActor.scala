@@ -1,6 +1,7 @@
 package spark.jobserver
 
 import java.util.concurrent.Executors._
+import java.util.concurrent.TimeUnit
 
 import akka.actor.{ActorRef, PoisonPill, Props}
 import com.typesafe.config.Config
@@ -195,7 +196,9 @@ class JobManagerActor(contextConfig: Config) extends InstrumentedActor {
       import scala.concurrent.duration._
       import scala.concurrent.Await
 
-      val daoAskTimeout = Timeout(3 seconds)
+      val daoAskTimeout = Timeout(config.getDuration("spark.jobserver.short-timeout", TimeUnit.MILLISECONDS),
+        TimeUnit.MILLISECONDS)
+
       // TODO: refactor so we don't need Await, instead flatmap into more futures
       val resp = Await.result(
         (daoActor ? JobDAOActor.GetLastUploadTime(appName))(daoAskTimeout).mapTo[JobDAOActor.LastUploadTime],

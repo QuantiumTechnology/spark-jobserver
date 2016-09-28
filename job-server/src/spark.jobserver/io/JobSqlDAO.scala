@@ -275,16 +275,18 @@ class JobSqlDAO(config: Config) extends JobDAO {
         val sortQuery = joinQuery.sortBy(_._6.desc)
         val limitQuery = sortQuery.take(limit)
         // Transform the each row of the table into a map of JobInfo values
-        limitQuery.list.map {
-          case (id, context, jarId, classpath, start, end, err) =>
-            JobInfo(id,
-              context,
-              jarMap(jarId),
-              classpath,
-              convertDateSqlToJoda(start),
-              end.map(convertDateSqlToJoda(_)),
-              err.map(new Throwable(_)))
-        }.toSeq
+        for {
+          (id, context, jarId, classpath, start, end, err) <- limitQuery.list
+          jarInfo <- jarMap.get(jarId)
+        } yield {
+          JobInfo(id,
+            context,
+            jarInfo,
+            classpath,
+            convertDateSqlToJoda(start),
+            end.map(convertDateSqlToJoda(_)),
+            err.map(new Throwable(_)))
+        }
     }
   }
 
@@ -304,15 +306,18 @@ class JobSqlDAO(config: Config) extends JobDAO {
         } yield
           (j.jobId, j.contextName, j.jarId, j.classPath, j.startTime,
             j.endTime, j.error)
-        joinQuery.list.map { case (id, context, jarId, classpath, start, end, err) =>
+        (for {
+          (id, context, jarId, classpath, start, end, err) <- joinQuery.list
+          jarInfo <- jarMap.get(jarId)
+        } yield {
           JobInfo(id,
             context,
-            jarMap(jarId),
+            jarInfo,
             classpath,
             convertDateSqlToJoda(start),
             end.map(convertDateSqlToJoda(_)),
             err.map(new Throwable(_)))
-        }.headOption
+        }).headOption
     }
   }
 }

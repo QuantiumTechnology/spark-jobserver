@@ -10,6 +10,7 @@ import org.slf4j.LoggerFactory
 import scala.slick.driver.JdbcProfile
 import scala.reflect.runtime.universe
 import org.apache.commons.dbcp.BasicDataSource
+import scala.slick.jdbc.StaticQuery.interpolation
 
 class JobSqlDAO(config: Config) extends JobDAO {
   val slickDriverClass = config.getString("spark.jobserver.sqldao.slick-driver")
@@ -259,49 +260,64 @@ class JobSqlDAO(config: Config) extends JobDAO {
   override def getJobInfos(limit: Int): Seq[JobInfo] = {
     db withSession {
       implicit sessions =>
-
+        val query = sql"""
+          SELECT JAR_ID, APP_NAME, UPLOAD_TIME
+          FROM JARS;
+          """.as[(Int, String, Timestamp)]
+        val jarMap = query.list.map {
+          case (id, app, upload) => id -> JarInfo(app, convertDateSqlToJoda(upload))
+        }.toMap
         // Join the JARS and JOBS tables without unnecessary columns
         val joinQuery = for {
-          jar <- jars
-          j <- jobs if j.jarId === jar.jarId
+          j <- jobs
         } yield
-          (j.jobId, j.contextName, jar.appName, jar.uploadTime, j.classPath, j.startTime, j.endTime, j.error)
+          (j.jobId, j.contextName, j.jarId, j.classPath, j.startTime, j.endTime, j.error)
         val sortQuery = joinQuery.sortBy(_._6.desc)
         val limitQuery = sortQuery.take(limit)
         // Transform the each row of the table into a map of JobInfo values
-        limitQuery.list.map {
-          case (id, context, app, upload, classpath, start, end, err) =>
-            JobInfo(id,
-              context,
-              JarInfo(app, convertDateSqlToJoda(upload)),
-              classpath,
-              convertDateSqlToJoda(start),
-              end.map(convertDateSqlToJoda(_)),
-              err.map(new Throwable(_)))
-        }.toSeq
+        for {
+          (id, context, jarId, classpath, start, end, err) <- limitQuery.list
+          jarInfo <- jarMap.get(jarId)
+        } yield {
+          JobInfo(id,
+            context,
+            jarInfo,
+            classpath,
+            convertDateSqlToJoda(start),
+            end.map(convertDateSqlToJoda(_)),
+            err.map(new Throwable(_)))
+        }
     }
   }
 
   override def getJobInfo(jobId: String): Option[JobInfo] = {
     db withSession {
       implicit sessions =>
-
+        val query = sql"""
+          SELECT JAR_ID, APP_NAME, UPLOAD_TIME
+          FROM JARS;
+          """.as[(Int, String, Timestamp)]
+        val jarMap = query.list.map {
+          case (id, app, upload) => id -> JarInfo(app, convertDateSqlToJoda(upload))
+        }.toMap
         // Join the JARS and JOBS tables without unnecessary columns
         val joinQuery = for {
-          jar <- jars
-          j <- jobs if j.jarId === jar.jarId && j.jobId === jobId
+          j <- jobs if j.jobId === jobId
         } yield
-          (j.jobId, j.contextName, jar.appName, jar.uploadTime, j.classPath, j.startTime,
+          (j.jobId, j.contextName, j.jarId, j.classPath, j.startTime,
             j.endTime, j.error)
-        joinQuery.list.map { case (id, context, app, upload, classpath, start, end, err) =>
+        (for {
+          (id, context, jarId, classpath, start, end, err) <- joinQuery.list
+          jarInfo <- jarMap.get(jarId)
+        } yield {
           JobInfo(id,
             context,
-            JarInfo(app, convertDateSqlToJoda(upload)),
+            jarInfo,
             classpath,
             convertDateSqlToJoda(start),
             end.map(convertDateSqlToJoda(_)),
             err.map(new Throwable(_)))
-        }.headOption
+        }).headOption
     }
   }
 }

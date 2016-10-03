@@ -272,7 +272,7 @@ class JobSqlDAO(config: Config) extends JobDAO {
           j <- jobs
         } yield
           (j.jobId, j.contextName, j.jarId, j.classPath, j.startTime, j.endTime, j.error)
-        val sortQuery = joinQuery.sortBy(_._6.desc)
+        val sortQuery = joinQuery.sortBy(_._5.desc)
         val limitQuery = sortQuery.take(limit)
         // Transform the each row of the table into a map of JobInfo values
         for {
